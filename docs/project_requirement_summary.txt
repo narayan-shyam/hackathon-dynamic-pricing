@@ -1,0 +1,176 @@
+use mcpp filesystem and make changes locally iin this ppath - D:\Narayan\Work\hackathon-dynamic-pricing. Focus first on Phase 1, 2, 3 and 7. write the code in the form of python notebook for Databricks logic. rest api as fast api, ui using Streamlit. Keep the logic very simple.
+
+Project Summary
+Title:
+AI-Assisted Automated Deployment of ML Models and Dynamic Pricing Strategy for GlobalMart
+Objective:
+Develop a production-ready, end-to-end machine learning pipeline that enables GlobalMart to implement a dynamic pricing strategy for its Tide detergent brand. The solution will analyze sales, competitor pricing, customer behavior, and inventory data to optimize pricing decisions, maximize revenue, and balance demand with inventory efficiency. The project will leverage AI-assisted coding tools such as GitHub Copilot to ensure best practices in automation, modular coding, deployment, monitoring, testing, and continuous retraining on Azure ML Managed Endpoints.
+
+Implementation Plan
+Phase 1:
+Complete ML model development lifecycle including data preprocessing, feature engineering, model selection, hyperparameter tuning, and validation with MLflow integration.
+Phase 2:
+Automate deployment of trained regression/classification models to Azure ML Managed Endpoints with comprehensive logging and error handling.
+Phase 3:
+Implement a robust testing framework including smoke, unit, and integration tests covering the ML pipeline and deployment.
+Phase 4:
+Build monitoring and logging infrastructure with drift detection, alerting, and model performance tracking.
+Phase 5:
+Develop automated retraining pipelines triggered by monitoring alerts or scheduled intervals, incorporating champion-challenger model strategies.
+Phase 6:
+Create a CI/CD pipeline using GitHub Actions for end-to-end automation of testing, deployment, and retraining workflows.
+Phase 7:
+Develop a responsive web application backend and frontend (Streamlit) to provide batch prediction capabilities via Azure ML Managed Endpoints.
+
+Deliverables
+Prototype Deliverables:
+Fully functional ML pipeline covering preprocessing, feature engineering, model training, hyperparameter tuning, and validation with MLflow.
+Automated deployment to Azure ML Managed Endpoints with versioning and robust error handling.
+Comprehensive test suites including smoke, unit, and integration tests.
+Model monitoring infrastructure for tracking, alerting, and performance visualization.
+Automated retraining pipeline triggered by performance metrics or scheduled intervals.
+CI/CD pipeline configured with GitHub Actions for end-to-end automation.
+Responsive web application backend and frontend for batch predictions.
+
+
+Documentation Deliverables:
+Solution architecture diagrams and workflow documentation.
+Setup and usage guides for ML pipeline, deployment, monitoring, and retraining.
+Testing framework and CI/CD pipeline documentation.
+Web application architecture and user guide.
+Codebase documentation with comments, docstrings, and troubleshooting FAQ.
+
+
+Note: All deliverables—code, testing suites, monitoring infrastructure, CI/CD workflows, and documentation—are created leveraging GitHub Copilot for AI-assisted coding, ensuring adherence to best practices, faster development, and enhanced code quality.
+=================
+
+Azure tch stack - already created.
+
+tpl-oops-all-ai - Resource group
+oops_all_ai_ad - Azure Databricks Service
+oopsallai-kv - Azure Key vault
+oopsallai-mlstudio - Azure Machine Learning workspace
+
+=====
+Data:
+
+1) competitor_data.csv
+Column Name,Data Type,Description
+Date,object,Date of competitor pricing observation
+Brand,object,Brand name of the competitor product
+MRP,float64,Maximum Retail Price set by the competitor
+DiscountRate,float64,Discount rate offered by the competitor (in %)
+BasePrice,float64,Base price after subtracting discount from MRP
+FinalPrice,float64,Final price used for customer-facing pricing
+
+2) customer_behavior_data.csv
+Column Name,Data Type,Description
+Date,object,Date of recorded customer behavior
+CTR,float64,Click-through rate of product listings
+AbandonedCartRate,float64,Rate at which customers abandon carts
+BounceRate,float64,Percentage of users leaving after visiting a product page
+FunnelDrop_ViewToCart,float64,Drop-off rate from viewing product to adding to cart
+FunnelDrop_CartToCheckout,float64,Drop-off rate from cart to checkout
+ReturningVisitorRatio,float64,Ratio of returning visitors to total visitors
+AvgSessionDuration_sec,float64,Average session duration in seconds
+
+
+3) inventory_data.csv
+Column Name,Data Type,Description
+Date,object,Date of inventory data capture
+FC_ID,object,Fulfillment Center Identifier
+IsMetro,bool,Boolean flag indicating if FC is located in a metro city
+StockStart,int64,Stock count at the beginning of the day
+Demand,int64,Forecasted or actual customer demand for the day
+DemandFulfilled,int64,Demand successfully fulfilled on the same day
+Backorders,int64,Orders that could not be fulfilled due to insufficient stock
+StockEnd,int64,Stock remaining at the end of the day
+ReorderPoint,int64,Pre-defined threshold for reordering inventory
+OrderPlaced,int64,Whether a reorder request was triggered
+OrderQty,int64,Quantity ordered for replenishment
+LeadTimeFloat,float64,Lead time for replenishment in days (can be fractional)
+SafetyStock,int64,Extra inventory kept to mitigate uncertainty in demand/supply
+
+4) sales_data.csv
+
+Column Name,Data Type,Description
+TransactionDate,object,Date at which transaction is made
+MRP,float64,MRP at which the product is sold
+NoPromoPrice,float64,Price of product after discount
+SellingPrice,float64,Price at which product is sold after discounts (if applicable)
+UnitsSold,int64,Number of units sold of the product
+===============
+
+Sample code:
+
+Python model code:
+Load data:
+# Databricks notebook cell
+# filepath: notebooks/feature_engineering_databricks.py
+
+from pyspark.sql import SparkSession
+
+spark = SparkSession.builder.appName("DynamicPricing").getOrCreate()
+
+sales_df = spark.read.csv("/dbfs/FileStore/dataset/Sales Data.csv", header=True, inferSchema=True)
+competitor_df = spark.read.csv("/dbfs/FileStore/dataset/Competitor Pricing Data.csv", header=True, inferSchema=True)
+customer_df = spark.read.csv("/dbfs/FileStore/dataset/Daily Customer Behavior.csv", header=True, inferSchema=True)
+inventory_df = spark.read.csv("/dbfs/FileStore/dataset/Inventory Data.csv", header=True, inferSchema=True)
+
+Clean data:
+# Drop duplicates and handle missing values
+sales_df = sales_df.dropDuplicates().na.drop()
+competitor_df = competitor_df.dropDuplicates().na.fill(0)
+customer_df = customer_df.dropDuplicates().na.fill(0)
+inventory_df = inventory_df.dropDuplicates().na.fill(0)
+
+Feature Engineering:
+from pyspark.sql.functions import col
+
+# Join sales and competitor data
+df = sales_df.join(competitor_df, on=["Date", "Product"], how="left") \
+             .join(customer_df, on=["Date"], how="left") \
+             .join(inventory_df, on=["Date", "Product"], how="left")
+
+# Example feature: price difference with main competitor
+df = df.withColumn("price_diff", col("Price") - col("Competitor_Price"))
+
+# Example feature: inventory ratio
+df = df.withColumn("inventory_ratio", col("Inventory_Level") / col("Max_Inventory_Level"))
+
+# Select features for modeling
+feature_cols = [
+    "Price", "Competitor_Price", "price_diff", "inventory_ratio",
+    "Customer_Visits", "Conversion_Rate", "Promotion", "Units_Sold"
+]
+model_df = df.select(*feature_cols)
+
+Export Processed Data to MLStudio:
+# Save as CSV for ML Studio
+model_df.toPandas().to_csv("/dbfs/FileStore/processed/processed_data.csv", index=False)
+Training model in MLStudio:
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+import mlflow
+import mlflow.sklearn
+
+# Load processed data
+df = pd.read_csv("processed_data.csv")
+
+# Features and target
+X = df.drop("Units_Sold", axis=1)
+y = df["Units_Sold"]
+
+# Train-test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# MLflow experiment tracking
+mlflow.set_experiment("dynamic_pricing_tide")
+with mlflow.start_run():
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(X_train, y_train)
+    score = model.score(X_test, y_test)
+    mlflow.log_metric("r2_score", score)
+    mlflow.sklearn.log_model(model, "model")
+    print(f"Test R2 Score: {score}")
