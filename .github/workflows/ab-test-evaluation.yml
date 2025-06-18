@@ -1,0 +1,452 @@
+name: A/B Test Evaluation
+
+on:
+  schedule:
+    # Run daily to check A/B test progress
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      test_id:
+        description: 'A/B Test ID to evaluate'
+        required: false
+      force_promotion:
+        description: 'Force promote challenger'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.9'
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+
+jobs:
+  evaluate-ab-test:
+    runs-on: ubuntu-latest
+    outputs:
+      should_promote: ${{ steps.evaluate.outputs.should_promote }}
+      test_results: ${{ steps.evaluate.outputs.test_results }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pandas numpy scipy scikit-learn mlflow azure-ai-ml
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Collect A/B test metrics
+      id: collect
+      run: |
+        python -c "
+        import json
+        import numpy as np
+        from datetime import datetime, timedelta
+        import os
+        
+        # Simulate collecting metrics from both champion and challenger
+        # In production, this would query actual monitoring data
+        
+        # For demo, simulate 7 days of data
+        np.random.seed(42)
+        
+        # Simulate champion performance (baseline)
+        champion_requests = np.random.poisson(1000, 7)  # Daily requests
+        champion_errors = np.random.poisson(5, 7)       # Daily errors
+        champion_response_times = np.random.normal(150, 30, 7)  # Response time in ms
+        champion_predictions = np.random.normal(75, 10, sum(champion_requests))
+        champion_actual = champion_predictions + np.random.normal(0, 8, len(champion_predictions))
+        champion_mae = np.mean(np.abs(champion_predictions - champion_actual))
+        
+        # Simulate challenger performance (slightly better)
+        challenger_requests = np.random.poisson(100, 7)  # 10% traffic
+        challenger_errors = np.random.poisson(0.4, 7)    # Fewer errors
+        challenger_response_times = np.random.normal(140, 25, 7)  # Slightly faster
+        challenger_predictions = np.random.normal(77, 9, sum(challenger_requests))
+        challenger_actual = challenger_predictions + np.random.normal(0, 7, len(challenger_predictions))
+        challenger_mae = np.mean(np.abs(challenger_predictions - challenger_actual))
+        
+        metrics = {
+            'collection_date': datetime.now().isoformat(),
+            'test_duration_days': 7,
+            'champion': {
+                'total_requests': int(sum(champion_requests)),
+                'total_errors': int(sum(champion_errors)),
+                'error_rate': float(sum(champion_errors) / sum(champion_requests) * 100),
+                'avg_response_time': float(np.mean(champion_response_times)),
+                'mae': float(champion_mae),
+                'predictions_count': len(champion_predictions)
+            },
+            'challenger': {
+                'total_requests': int(sum(challenger_requests)),
+                'total_errors': int(sum(challenger_errors)),
+                'error_rate': float(sum(challenger_errors) / sum(challenger_requests) * 100),
+                'avg_response_time': float(np.mean(challenger_response_times)),
+                'mae': float(challenger_mae),
+                'predictions_count': len(challenger_predictions)
+            }
+        }
+        
+        # Save metrics
+        with open('ab_test_metrics.json', 'w') as f:
+            json.dump(metrics, f, indent=2)
+        
+        print('A/B test metrics collected')
+        print(f'Champion MAE: {champion_mae:.2f}')
+        print(f'Challenger MAE: {challenger_mae:.2f}')
+        "
+    
+    - name: Evaluate test results
+      id: evaluate
+      run: |
+        python -c "
+        import json
+        import numpy as np
+        from scipy import stats
+        
+        # Load metrics
+        with open('ab_test_metrics.json', 'r') as f:
+            metrics = json.load(f)
+        
+        champion = metrics['champion']
+        challenger = metrics['challenger']
+        
+        # Calculate improvement percentages
+        mae_improvement = (champion['mae'] - challenger['mae']) / champion['mae'] * 100
+        response_time_improvement = (champion['avg_response_time'] - challenger['avg_response_time']) / champion['avg_response_time'] * 100
+        error_rate_improvement = (champion['error_rate'] - challenger['error_rate']) / max(champion['error_rate'], 0.01) * 100
+        
+        # Statistical significance test (simplified)
+        # In production, would use proper A/B testing statistical methods
+        min_improvement_threshold = 3.0  # 3% improvement required
+        min_requests_threshold = 500     # Minimum requests for statistical power
+        
+        # Evaluation criteria
+        criteria_met = {
+            'mae_improvement': mae_improvement >= min_improvement_threshold,
+            'sufficient_traffic': challenger['total_requests'] >= min_requests_threshold,
+            'error_rate_acceptable': challenger['error_rate'] <= champion['error_rate'] * 1.1,  # No more than 10% increase
+            'response_time_acceptable': challenger['avg_response_time'] <= champion['avg_response_time'] * 1.1
+        }
+        
+        # Overall evaluation
+        should_promote = all(criteria_met.values()) or '${{ github.event.inputs.force_promotion }}' == 'true'
+        
+        evaluation_results = {
+            'evaluation_date': metrics['collection_date'],
+            'improvements': {
+                'mae_improvement_pct': mae_improvement,
+                'response_time_improvement_pct': response_time_improvement,
+                'error_rate_improvement_pct': error_rate_improvement
+            },
+            'criteria_met': criteria_met,
+            'should_promote': should_promote,
+            'recommendation': 'promote' if should_promote else 'continue_testing',
+            'force_promotion': '${{ github.event.inputs.force_promotion }}' == 'true'
+        }
+        
+        # Save evaluation results
+        with open('evaluation_results.json', 'w') as f:
+            json.dump(evaluation_results, f, indent=2)
+        
+        print(f'Evaluation completed: should_promote = {should_promote}')
+        print(f'MAE improvement: {mae_improvement:.2f}%')
+        print(f'Response time improvement: {response_time_improvement:.2f}%')
+        print(f'Error rate improvement: {error_rate_improvement:.2f}%')
+        
+        # Set outputs
+        print(f'::set-output name=should_promote::{str(should_promote).lower()}')
+        print(f'::set-output name=test_results::{json.dumps(evaluation_results)}')
+        "
+    
+    - name: Upload evaluation artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ab-test-evaluation
+        path: |
+          ab_test_metrics.json
+          evaluation_results.json
+
+  promote-challenger:
+    runs-on: ubuntu-latest
+    needs: evaluate-ab-test
+    if: needs.evaluate-ab-test.outputs.should_promote == 'true'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install mlflow azure-ai-ml
+    
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+    
+    - name: Download evaluation results
+      uses: actions/download-artifact@v3
+      with:
+        name: ab-test-evaluation
+    
+    - name: Promote challenger to champion
+      run: |
+        python -c "
+        import mlflow
+        import json
+        import os
+        from datetime import datetime
+        
+        # Load evaluation results
+        with open('evaluation_results.json', 'r') as f:
+            results = json.load(f)
+        
+        print('Promoting challenger to champion...')
+        
+        # Set MLflow tracking URI
+        mlflow.set_tracking_uri(os.environ.get('MLFLOW_TRACKING_URI', 'file:./mlruns'))
+        
+        try:
+            client = mlflow.MlflowClient()
+            
+            # Get current challenger model
+            challenger_versions = client.get_latest_versions('dynamic_pricing_model_challenger', stages=['None'])
+            
+            if challenger_versions:
+                challenger_version = challenger_versions[0]
+                
+                # Archive current champion
+                try:
+                    champion_versions = client.get_latest_versions('dynamic_pricing_model_prod', stages=['Production'])
+                    if champion_versions:
+                        client.transition_model_version_stage(
+                            name='dynamic_pricing_model_prod',
+                            version=champion_versions[0].version,
+                            stage='Archived'
+                        )
+                        print('Current champion archived')
+                except Exception as e:
+                    print(f'No current champion to archive: {e}')
+                
+                # Copy challenger to production model registry
+                model_uri = f'models:/{challenger_version.name}/{challenger_version.version}'
+                
+                # Register as new production model
+                new_version = mlflow.register_model(
+                    model_uri,
+                    'dynamic_pricing_model_prod'
+                )
+                
+                # Transition to production
+                client.transition_model_version_stage(
+                    name='dynamic_pricing_model_prod',
+                    version=new_version.version,
+                    stage='Production'
+                )
+                
+                # Add promotion metadata
+                client.set_model_version_tag(
+                    'dynamic_pricing_model_prod',
+                    new_version.version,
+                    'promotion_date',
+                    datetime.now().isoformat()
+                )
+                client.set_model_version_tag(
+                    'dynamic_pricing_model_prod',
+                    new_version.version,
+                    'ab_test_results',
+                    json.dumps(results['improvements'])
+                )
+                client.set_model_version_tag(
+                    'dynamic_pricing_model_prod',
+                    new_version.version,
+                    'promoted_from_challenger',
+                    challenger_version.version
+                )
+                
+                print(f'Challenger promoted to production version {new_version.version}')
+                
+            else:
+                print('No challenger model found')
+                exit(1)
+                
+        except Exception as e:
+            print(f'Error promoting model: {e}')
+            exit(1)
+        "
+    
+    - name: Update production deployment
+      run: |
+        # Get the latest production model and update the deployment
+        # This would update the actual production API to use the new model
+        
+        # For Azure App Service, update the app settings
+        az webapp config appsettings set \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name dynamic-pricing-api-prod \
+          --settings \
+            MODEL_VERSION=latest \
+            MODEL_PROMOTION_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+            LAST_AB_TEST_RESULT=promoted
+        
+        # Restart the app to pick up new model
+        az webapp restart \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --name dynamic-pricing-api-prod
+        
+        echo "Production deployment updated with new champion model"
+    
+    - name: Cleanup challenger resources
+      run: |
+        # Remove challenger container instances
+        challenger_containers=$(az container list \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "[?contains(name, 'challenger')].name" -o tsv)
+        
+        for container in $challenger_containers; do
+          echo "Removing challenger container: $container"
+          az container delete \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name $container \
+            --yes
+        done
+        
+        echo "Challenger resources cleaned up"
+
+  notify-results:
+    runs-on: ubuntu-latest
+    needs: [evaluate-ab-test, promote-challenger]
+    if: always()
+    
+    steps:
+    - name: Download evaluation results
+      uses: actions/download-artifact@v3
+      with:
+        name: ab-test-evaluation
+    
+    - name: Notify promotion success
+      if: needs.promote-challenger.result == 'success'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const results = JSON.parse(fs.readFileSync('evaluation_results.json', 'utf8'));
+          
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `🚀 Champion Model Promoted - A/B Test Success`,
+            body: `
+            ## 🏆 Challenger Successfully Promoted to Champion!
+            
+            **Evaluation Date:** ${results.evaluation_date}
+            **Promotion Trigger:** ${{ github.event_name === 'workflow_dispatch' ? 'Manual' : 'Automated' }}
+            
+            ### 📊 Performance Improvements:
+            - **MAE Improvement:** ${results.improvements.mae_improvement_pct.toFixed(2)}%
+            - **Response Time:** ${results.improvements.response_time_improvement_pct.toFixed(2)}% faster
+            - **Error Rate:** ${results.improvements.error_rate_improvement_pct.toFixed(2)}% reduction
+            
+            ### ✅ Promotion Criteria Met:
+            ${Object.entries(results.criteria_met).map(([key, value]) => `- ${key}: ${value ? '✅' : '❌'}`).join('\n')}
+            
+            ### 🔄 Actions Completed:
+            - ✅ Challenger evaluated and approved
+            - ✅ Previous champion archived
+            - ✅ Challenger promoted to production
+            - ✅ Production deployment updated
+            - ✅ Challenger resources cleaned up
+            
+            ### 🎯 Impact:
+            The new champion model is now serving 100% of production traffic with improved performance metrics.
+            
+            **Next A/B test will be triggered with the next retraining cycle.**
+            `,
+            labels: ['ml-ops', 'promotion', 'success', 'champion']
+          })
+    
+    - name: Notify if promotion not needed
+      if: needs.evaluate-ab-test.outputs.should_promote == 'false'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const results = JSON.parse(fs.readFileSync('evaluation_results.json', 'utf8'));
+          
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `📊 A/B Test Evaluation - Continue Testing`,
+            body: `
+            ## 📊 A/B Test Evaluation Results
+            
+            **Evaluation Date:** ${results.evaluation_date}
+            **Recommendation:** Continue Testing
+            
+            ### 📈 Current Performance Comparison:
+            - **MAE Improvement:** ${results.improvements.mae_improvement_pct.toFixed(2)}%
+            - **Response Time:** ${results.improvements.response_time_improvement_pct.toFixed(2)}% change
+            - **Error Rate:** ${results.improvements.error_rate_improvement_pct.toFixed(2)}% change
+            
+            ### 📋 Promotion Criteria Status:
+            ${Object.entries(results.criteria_met).map(([key, value]) => `- ${key}: ${value ? '✅' : '❌'}`).join('\n')}
+            
+            ### 🔄 Next Steps:
+            - Continue A/B testing with current traffic split
+            - Monitor for additional performance data
+            - Automatic re-evaluation in 24 hours
+            - Manual promotion available if needed
+            
+            The challenger model needs to meet all criteria before automatic promotion.
+            `,
+            labels: ['ml-ops', 'ab-test', 'evaluation', 'continue-testing']
+          })
+    
+    - name: Notify on evaluation failure
+      if: needs.evaluate-ab-test.result == 'failure'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `❌ A/B Test Evaluation Failed`,
+            body: `
+            ## ❌ A/B Test Evaluation Failed
+            
+            **Timestamp:** ${new Date().toISOString()}
+            **Workflow Run:** ${{ github.run_id }}
+            
+            The automated A/B test evaluation has failed. Please review the logs and take corrective action.
+            
+            ### Possible Issues:
+            - Metrics collection failure
+            - Azure resource access problems
+            - Statistical evaluation errors
+            - Data quality issues
+            
+            [View Workflow Logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            **Action Required:** Manual investigation needed.
+            `,
+            labels: ['ml-ops', 'ab-test', 'failure', 'urgent']
+          })
