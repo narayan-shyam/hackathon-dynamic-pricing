@@ -2,7 +2,7 @@ name: MLOps CI/CD Pipeline
 
 on:
   push:
-    branches: [main]
+    branches: [feature/dummy]
   pull_request:
 
 env:
