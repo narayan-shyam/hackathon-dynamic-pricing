@@ -7,62 +7,24 @@ on:
 
 jobs:
   deploy-api:
-    name: Deploy API to Azure Web App
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  name: Deploy API to Azure Web App
+  runs-on: ubuntu-latest
+  steps:
+    - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Check API requirements.txt exists
-        run: |
-          if [ ! -f "api/requirements.txt" ]; then
-            echo "❌ ERROR: api/requirements.txt not found!"
-            exit 1
-          fi
-
-      # Optional: Test dependencies installation
-      # - name: Install API dependencies for local test (optional)
-      #   run: |
-      #     cd api
-      #     python -m pip install --upgrade pip
-      #     pip install -r requirements.txt
-
-      - name: Deploy API folder (FastAPI) to Azure Web App
-        uses: azure/webapps-deploy@v2
-        with:
-          app-name: ${{ secrets.AZURE_API_WEBAPP_NAME }}
-          publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
-          package: ./api  # 👈 Important: Not zipped
+    - name: Deploy API to Azure Web App
+      uses: azure/webapps-deploy@v2
+      with:
+        app-name: ${{ secrets.AZURE_API_WEBAPP_NAME }}
+        publish-profile: ${{ secrets.AZURE_API_PUBLISH_PROFILE }}
+        package: ./api
 
   deploy-ui:
     name: Deploy UI to Azure Web App
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.10'
-
-      - name: Check UI requirements.txt exists
-        run: |
-          if [ ! -f "ui/requirements.txt" ]; then
-            echo "❌ ERROR: ui/requirements.txt not found!"
-            exit 1
-          fi
-
-      # Optional: Test dependencies installation
-      # - name: Install UI dependencies for local test (optional)
-      #   run: |
-      #     cd ui
-      #     python -m pip install --upgrade pip
-      #     pip install -r requirements.txt
-
+      
       - name: Deploy UI folder (Streamlit) to Azure Web App
         uses: azure/webapps-deploy@v2
         with:
