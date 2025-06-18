@@ -1,10 +1,6 @@
 # Dynamic Pricing Strategy for GlobalMart Tide Detergent
 # AI-Assisted Automated Deployment of ML Models
 
-[![CI/CD Pipeline](https://github.com/your-org/hackathon-dynamic-pricing/workflows/Dynamic%20Pricing%20ML%20Pipeline%20CI/CD/badge.svg)](https://github.com/your-org/hackathon-dynamic-pricing/actions)
-[![Model Retraining](https://github.com/your-org/hackathon-dynamic-pricing/workflows/Model%20Retraining%20Pipeline/badge.svg)](https://github.com/your-org/hackathon-dynamic-pricing/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-
 ## 🎯 Project Overview
 
 This project implements a **complete end-to-end machine learning pipeline** for dynamic pricing strategy using Azure technologies, featuring automated deployment, monitoring, and retraining capabilities. The system uses AI to optimize pricing decisions in real-time based on market conditions, competitor pricing, customer behavior, and inventory levels.
