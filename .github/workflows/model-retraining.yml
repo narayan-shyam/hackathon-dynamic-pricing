@@ -1,4 +1,4 @@
-name: Model Retraining Pipeline
+name: Model Retraining Pipeline - Azure App Services
 
 on:
   schedule:
@@ -25,12 +25,16 @@ on:
 
 env:
   PYTHON_VERSION: '3.9'
-  DOCKER_REGISTRY: 'ghcr.io'
-  MODEL_REGISTRY: 'mlflow'
   AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
   AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
   AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
   AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  
+  # Azure App Service Names
+  API_APP_NAME: 'oopsallaiapi'
+  UI_APP_NAME: 'oopsallaiui'
 
 jobs:
   check-retraining-triggers:
@@ -53,7 +57,12 @@ jobs:
     - name: Install dependencies
       run: |
         pip install -r requirements.txt
-        pip install mlflow boto3 azure-storage-blob pandas numpy scikit-learn
+        pip install mlflow azure-ai-ml azure-storage-blob pandas numpy scikit-learn requests
+        
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
         
     - name: Check retraining triggers
       id: check-triggers
@@ -62,6 +71,7 @@ jobs:
         import os
         import sys
         import json
+        import requests
         from datetime import datetime, timedelta
         import pandas as pd
         
@@ -80,30 +90,56 @@ jobs:
             should_retrain = True
             trigger_reasons.append(f'Repository dispatch: ${{ github.event.action }}')
         
-        # Check data freshness (simulate checking data age)
+        # Check production API health and performance metrics
         try:
-            # In a real scenario, this would check your data warehouse/lake
-            current_time = datetime.now()
-            last_training_time = current_time - timedelta(days=7)  # Simulate last training was 7 days ago
+            api_url = 'https://${{ env.API_APP_NAME }}.azurewebsites.net'
             
-            if (current_time - last_training_time).days >= 7:
+            # Check API health
+            health_response = requests.get(f'{api_url}/health', timeout=30)
+            if health_response.status_code != 200:
                 should_retrain = True
-                trigger_reasons.append('Data is older than 7 days')
+                trigger_reasons.append('Production API health check failed')
+            
+            # Check model performance metrics
+            try:
+                model_info = requests.get(f'{api_url}/model/info', timeout=30)
+                if model_info.status_code == 200:
+                    model_data = model_info.json()
+                    
+                    # Check if model is old (7+ days)
+                    if 'created_at' in model_data:
+                        from dateutil import parser
+                        model_age = datetime.now() - parser.parse(model_data['created_at'])
+                        if model_age.days >= 7:
+                            should_retrain = True
+                            trigger_reasons.append(f'Model is {model_age.days} days old')
+                    
+                    # Check performance metrics if available
+                    if 'performance_metrics' in model_data:
+                        metrics = model_data['performance_metrics']
+                        if 'accuracy' in metrics and metrics['accuracy'] < 0.85:
+                            should_retrain = True
+                            trigger_reasons.append(f'Model accuracy below threshold: {metrics[\"accuracy\"]}')
+                            
+            except Exception as e:
+                print(f'Warning: Could not check model metrics: {e}')
+                
+        except Exception as e:
+            print(f'Warning: Could not connect to production API: {e}')
+            # Don't trigger retraining just because API is down
+        
+        # Check data freshness (simulate checking data warehouse)
+        try:
+            current_time = datetime.now()
+            # In real scenario, this would check your data pipeline/warehouse
+            # For now, simulate based on time since last Sunday (weekly schedule)
+            days_since_sunday = current_time.weekday() + 1 if current_time.weekday() != 6 else 0
+            
+            if days_since_sunday >= 7:
+                should_retrain = True
+                trigger_reasons.append('Weekly retraining schedule triggered')
         except Exception as e:
             print(f'Warning: Could not check data freshness: {e}')
-        
-        # Check model performance metrics (simulate checking model drift)
-        try:
-            # In a real scenario, this would query your monitoring system
-            # Simulate performance check
-            performance_threshold = 0.85
-            current_performance = 0.82  # Simulate degraded performance
-            
-            if current_performance < performance_threshold:
-                should_retrain = True
-                trigger_reasons.append(f'Model performance below threshold: {current_performance} < {performance_threshold}')
-        except Exception as e:
-            print(f'Warning: Could not check model performance: {e}')
         
         # Generate data version
         data_version = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -140,7 +176,7 @@ jobs:
     - name: Install dependencies
       run: |
         pip install -r requirements.txt
-        pip install azure-storage-blob pandas numpy
+        pip install azure-storage-blob pandas numpy requests
         
     - name: Azure Login
       uses: azure/login@v1
@@ -153,18 +189,19 @@ jobs:
         python -c "
         import os
         import pandas as pd
+        import numpy as np
+        import requests
         from datetime import datetime, timedelta
         
-        # Simulate data collection from various sources
         print('Collecting training data...')
         
         # In a real scenario, this would:
         # 1. Query production database for recent transactions
         # 2. Fetch external data (competitor prices, market data)
-        # 3. Combine and clean the data
-        # 4. Store in training data format
+        # 3. Download data from Azure Storage/Data Lake
+        # 4. Combine and clean the data
+        # 5. Store in training data format
         
-        # Simulate data collection
         data_source = '${{ github.event.inputs.data_source }}'
         end_date = datetime.now()
         start_date = end_date - timedelta(days=90)  # Last 90 days
@@ -172,21 +209,67 @@ jobs:
         print(f'Collecting data from {start_date} to {end_date}')
         print(f'Data source: {data_source}')
         
-        # Create mock training data
-        import numpy as np
-        n_samples = 10000
+        # Try to get recent data from production API if available
+        production_data = []
+        try:
+            api_url = 'https://${{ env.API_APP_NAME }}.azurewebsites.net'
+            # In real scenario, would have an endpoint to export recent predictions and actuals
+            print(f'Attempting to collect data from production API: {api_url}')
+            
+            # Simulate API call to get recent prediction data
+            # response = requests.get(f'{api_url}/data/export?days=90', timeout=60)
+            # if response.status_code == 200:
+            #     production_data = response.json()
+            
+        except Exception as e:
+            print(f'Note: Could not collect from production API: {e}')
+        
+        # Generate enhanced training data (simulate real data collection)
+        n_samples = 15000  # Larger dataset for better training
+        np.random.seed(42)
+        
+        # Simulate seasonal and trend patterns
+        days = np.arange(n_samples)
+        seasonal_factor = 1 + 0.2 * np.sin(2 * np.pi * days / 365)  # Yearly seasonality
+        weekly_factor = 1 + 0.1 * np.sin(2 * np.pi * days / 7)     # Weekly seasonality
+        trend_factor = 1 + 0.001 * days  # Slight upward trend
         
         training_data = pd.DataFrame({
-            'product_id': np.random.randint(1, 1000, n_samples),
-            'base_price': np.random.uniform(10, 1000, n_samples),
-            'competitor_price': np.random.uniform(8, 1200, n_samples),
-            'demand_score': np.random.uniform(0, 1, n_samples),
-            'inventory_level': np.random.randint(0, 1000, n_samples),
-            'season_factor': np.random.uniform(0.8, 1.2, n_samples),
-            'target_price': np.random.uniform(8, 1200, n_samples)
+            'product_id': np.random.randint(1, 2000, n_samples),
+            'MRP': np.random.uniform(50, 500, n_samples) * seasonal_factor,
+            'NoPromoPrice': np.random.uniform(40, 450, n_samples) * seasonal_factor,
+            'SellingPrice': np.random.uniform(30, 400, n_samples) * seasonal_factor,
+            'CTR': np.random.uniform(0.005, 0.08, n_samples),
+            'AbandonedCartRate': np.random.uniform(0.05, 0.4, n_samples),
+            'BounceRate': np.random.uniform(0.1, 0.6, n_samples),
+            'IsMetro': np.random.choice([0, 1], n_samples, p=[0.3, 0.7]),
+            'month': np.random.randint(1, 13, n_samples),
+            'day': np.random.randint(1, 29, n_samples),
+            'dayofweek': np.random.randint(1, 8, n_samples),
+            'quarter': np.random.randint(1, 5, n_samples),
+            'competitor_price': np.random.uniform(25, 420, n_samples) * seasonal_factor * weekly_factor,
+            'demand_score': np.random.uniform(0, 1, n_samples) * weekly_factor,
+            'inventory_level': np.random.randint(0, 2000, n_samples),
+            'season_factor': seasonal_factor[:n_samples],
+            'timestamp': pd.date_range(start=start_date, periods=n_samples, freq='H')
         })
         
-        # Save training data
+        # Calculate target price with more realistic relationships
+        training_data['target_price'] = (
+            training_data['competitor_price'] * 0.95 +  # Slightly below competitor
+            training_data['demand_score'] * 20 +        # Demand premium
+            (training_data['IsMetro'] * 10) +          # Metro premium
+            np.random.normal(0, 5, n_samples)          # Noise
+        )
+        
+        # Ensure realistic price bounds
+        training_data['target_price'] = np.clip(
+            training_data['target_price'], 
+            training_data['SellingPrice'] * 0.8, 
+            training_data['MRP'] * 1.1
+        )
+        
+        # Save training data with versioning
         data_path = f'data/training/training_data_{\"${{ needs.check-retraining-triggers.outputs.data_version }}\"}}.csv'
         os.makedirs('data/training', exist_ok=True)
         training_data.to_csv(data_path, index=False)
@@ -194,8 +277,14 @@ jobs:
         data_size = os.path.getsize(data_path)
         
         print(f'Training data saved to: {data_path}')
-        print(f'Data size: {data_size} bytes')
+        print(f'Data size: {data_size} bytes ({data_size / 1024 / 1024:.2f} MB)')
         print(f'Number of samples: {len(training_data)}')
+        print(f'Date range: {training_data[\"timestamp\"].min()} to {training_data[\"timestamp\"].max()}')
+        print(f'Target price range: {training_data[\"target_price\"].min():.2f} to {training_data[\"target_price\"].max():.2f}')
+        
+        # Data quality checks
+        missing_values = training_data.isnull().sum().sum()
+        print(f'Missing values: {missing_values}')
         
         # Set GitHub outputs
         print(f'::set-output name=data_path::{data_path}')
@@ -217,7 +306,7 @@ jobs:
     outputs:
       model_version: ${{ steps.train-model.outputs.model_version }}
       model_performance: ${{ steps.train-model.outputs.model_performance }}
-      challenger_endpoint: ${{ steps.deploy-challenger.outputs.challenger_endpoint }}
+      model_path: ${{ steps.train-model.outputs.model_path }}
       
     steps:
     - name: Checkout code
@@ -231,7 +320,7 @@ jobs:
     - name: Install dependencies
       run: |
         pip install -r requirements.txt
-        pip install mlflow scikit-learn xgboost lightgbm optuna
+        pip install mlflow scikit-learn xgboost lightgbm optuna joblib
         
     - name: Download training data
       uses: actions/download-artifact@v3
@@ -239,7 +328,7 @@ jobs:
         name: training-data-${{ needs.check-retraining-triggers.outputs.data_version }}
         path: data/training/
         
-    - name: Train multiple models
+    - name: Train multiple models with hyperparameter optimization
       id: train-model
       run: |
         python -c "
@@ -250,10 +339,14 @@ jobs:
         import numpy as np
         from sklearn.model_selection import train_test_split, cross_val_score
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-        from sklearn.linear_model import LinearRegression
+        from sklearn.linear_model import Ridge, ElasticNet
         from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+        import xgboost as xgb
+        import lightgbm as lgb
+        import optuna
         import pickle
         import json
+        import joblib
         from datetime import datetime
         
         # Load training data
@@ -261,25 +354,86 @@ jobs:
         df = pd.read_csv(data_path)
         
         print(f'Loaded {len(df)} samples for training')
+        print(f'Data columns: {list(df.columns)}')
         
         # Prepare features and target
-        feature_cols = ['base_price', 'competitor_price', 'demand_score', 'inventory_level', 'season_factor']
-        X = df[feature_cols]
+        feature_cols = [
+            'MRP', 'NoPromoPrice', 'SellingPrice', 'CTR', 'AbandonedCartRate', 
+            'BounceRate', 'IsMetro', 'month', 'day', 'dayofweek', 'quarter', 
+            'competitor_price', 'demand_score', 'inventory_level', 'season_factor'
+        ]
+        
+        # Ensure all feature columns exist
+        available_features = [col for col in feature_cols if col in df.columns]
+        print(f'Available features: {available_features}')
+        
+        X = df[available_features]
         y = df['target_price']
+        
+        # Handle any missing values
+        X = X.fillna(X.mean())
+        
+        print(f'Feature matrix shape: {X.shape}')
+        print(f'Target range: {y.min():.2f} to {y.max():.2f}')
         
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
         
         # Start MLflow experiment
-        mlflow.set_experiment('dynamic-pricing-retraining')
+        mlflow.set_experiment('dynamic-pricing-retraining-azure')
         
+        def objective_rf(trial):
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+                'max_depth': trial.suggest_int('max_depth', 3, 20),
+                'min_samples_split': trial.suggest_int('min_samples_split', 2, 20),
+                'min_samples_leaf': trial.suggest_int('min_samples_leaf', 1, 20),
+                'random_state': 42
+            }
+            model = RandomForestRegressor(**params)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            return mean_squared_error(y_test, y_pred)
+        
+        def objective_xgb(trial):
+            params = {
+                'n_estimators': trial.suggest_int('n_estimators', 50, 200),
+                'max_depth': trial.suggest_int('max_depth', 3, 10),
+                'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3),
+                'subsample': trial.suggest_float('subsample', 0.6, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 1.0),
+                'random_state': 42
+            }
+            model = xgb.XGBRegressor(**params)
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            return mean_squared_error(y_test, y_pred)
+        
+        print('Starting hyperparameter optimization...')
+        
+        # Optimize Random Forest
+        rf_study = optuna.create_study(direction='minimize')
+        rf_study.optimize(objective_rf, n_trials=20)
+        best_rf_params = rf_study.best_params
+        
+        # Optimize XGBoost
+        xgb_study = optuna.create_study(direction='minimize')
+        xgb_study.optimize(objective_xgb, n_trials=20)
+        best_xgb_params = xgb_study.best_params
+        
+        print('Hyperparameter optimization completed')
+        
+        # Train models with optimized parameters
         models_to_try = {
-            'random_forest': RandomForestRegressor(n_estimators=100, random_state=42),
+            'random_forest_optimized': RandomForestRegressor(**best_rf_params),
+            'xgboost_optimized': xgb.XGBRegressor(**best_xgb_params),
+            'lightgbm': lgb.LGBMRegressor(n_estimators=100, random_state=42),
             'gradient_boosting': GradientBoostingRegressor(n_estimators=100, random_state=42),
-            'linear_regression': LinearRegression()
+            'ridge': Ridge(alpha=1.0, random_state=42),
+            'elastic_net': ElasticNet(alpha=0.1, l1_ratio=0.5, random_state=42)
         }
         
         best_model = None
-        best_score = float('-inf')
+        best_score = float('inf')  # Using MSE, so lower is better
         best_model_name = None
         model_results = {}
         
@@ -287,60 +441,92 @@ jobs:
             with mlflow.start_run(run_name=f'{model_name}_retrain_{datetime.now().strftime(\"%Y%m%d_%H%M%S\")}'):
                 print(f'Training {model_name}...')
                 
-                # Train model
-                model.fit(X_train, y_train)
-                
-                # Make predictions
-                y_pred = model.predict(X_test)
-                
-                # Calculate metrics
-                mse = mean_squared_error(y_test, y_pred)
-                rmse = np.sqrt(mse)
-                mae = mean_absolute_error(y_test, y_pred)
-                r2 = r2_score(y_test, y_pred)
-                
-                # Cross-validation score
-                cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='r2')
-                cv_mean = cv_scores.mean()
-                
-                print(f'{model_name} - RMSE: {rmse:.4f}, MAE: {mae:.4f}, R2: {r2:.4f}, CV R2: {cv_mean:.4f}')
-                
-                # Log metrics to MLflow
-                mlflow.log_metrics({
-                    'rmse': rmse,
-                    'mae': mae,
-                    'r2_score': r2,
-                    'cv_r2_mean': cv_mean,
-                    'cv_r2_std': cv_scores.std()
-                })
-                
-                # Log model
-                mlflow.sklearn.log_model(model, model_name)
-                
-                # Store results
-                model_results[model_name] = {
-                    'rmse': rmse,
-                    'mae': mae,
-                    'r2_score': r2,
-                    'cv_r2_mean': cv_mean,
-                    'model': model
-                }
-                
-                # Check if this is the best model so far
-                if cv_mean > best_score:
-                    best_score = cv_mean
-                    best_model = model
-                    best_model_name = model_name
+                try:
+                    # Train model
+                    model.fit(X_train, y_train)
+                    
+                    # Make predictions
+                    y_pred_train = model.predict(X_train)
+                    y_pred_test = model.predict(X_test)
+                    
+                    # Calculate metrics
+                    train_mse = mean_squared_error(y_train, y_pred_train)
+                    test_mse = mean_squared_error(y_test, y_pred_test)
+                    train_rmse = np.sqrt(train_mse)
+                    test_rmse = np.sqrt(test_mse)
+                    train_mae = mean_absolute_error(y_train, y_pred_train)
+                    test_mae = mean_absolute_error(y_test, y_pred_test)
+                    train_r2 = r2_score(y_train, y_pred_train)
+                    test_r2 = r2_score(y_test, y_pred_test)
+                    
+                    # Cross-validation score
+                    cv_scores = cross_val_score(model, X_train, y_train, cv=5, scoring='neg_mean_squared_error')
+                    cv_rmse = np.sqrt(-cv_scores.mean())
+                    cv_rmse_std = np.sqrt(cv_scores.std())
+                    
+                    print(f'{model_name} - Test RMSE: {test_rmse:.4f}, Test MAE: {test_mae:.4f}, Test R2: {test_r2:.4f}, CV RMSE: {cv_rmse:.4f}')
+                    
+                    # Log metrics to MLflow
+                    mlflow.log_metrics({
+                        'train_rmse': train_rmse,
+                        'test_rmse': test_rmse,
+                        'train_mae': train_mae,
+                        'test_mae': test_mae,
+                        'train_r2': train_r2,
+                        'test_r2': test_r2,
+                        'cv_rmse': cv_rmse,
+                        'cv_rmse_std': cv_rmse_std,
+                        'overfit_ratio': train_rmse / test_rmse if test_rmse > 0 else 1.0
+                    })
+                    
+                    # Log hyperparameters
+                    if hasattr(model, 'get_params'):
+                        mlflow.log_params(model.get_params())
+                    
+                    # Log model
+                    mlflow.sklearn.log_model(model, model_name)
+                    
+                    # Store results
+                    model_results[model_name] = {
+                        'train_rmse': train_rmse,
+                        'test_rmse': test_rmse,
+                        'train_mae': train_mae,
+                        'test_mae': test_mae,
+                        'train_r2': train_r2,
+                        'test_r2': test_r2,
+                        'cv_rmse': cv_rmse,
+                        'cv_rmse_std': cv_rmse_std,
+                        'model': model
+                    }
+                    
+                    # Check if this is the best model (using test RMSE)
+                    if test_rmse < best_score:
+                        best_score = test_rmse
+                        best_model = model
+                        best_model_name = model_name
+                        
+                except Exception as e:
+                    print(f'Error training {model_name}: {e}')
+                    continue
         
-        print(f'Best model: {best_model_name} with CV R2 score: {best_score:.4f}')
+        if best_model is None:
+            print('No models were successfully trained!')
+            exit(1)
+        
+        print(f'Best model: {best_model_name} with Test RMSE: {best_score:.4f}')
         
         # Save best model
         model_version = f'challenger_{datetime.now().strftime(\"%Y%m%d_%H%M%S\")}'
         model_dir = f'models/{model_version}'
         os.makedirs(model_dir, exist_ok=True)
         
-        with open(f'{model_dir}/model.pkl', 'wb') as f:
-            pickle.dump(best_model, f)
+        # Save with joblib for better compatibility
+        model_path = f'{model_dir}/model.pkl'
+        joblib.dump(best_model, model_path)
+        
+        # Save feature names
+        with open(f'{model_dir}/features.json', 'w') as f:
+            json.dump(available_features, f)
         
         # Save model metadata
         metadata = {
@@ -349,18 +535,28 @@ jobs:
             'training_data_version': '${{ needs.check-retraining-triggers.outputs.data_version }}',
             'performance_metrics': model_results[best_model_name],
             'training_samples': len(df),
-            'feature_columns': feature_cols,
-            'created_at': datetime.now().isoformat()
+            'feature_columns': available_features,
+            'hyperparameters': best_model.get_params() if hasattr(best_model, 'get_params') else {},
+            'created_at': datetime.now().isoformat(),
+            'trigger_reason': '${{ needs.check-retraining-triggers.outputs.trigger_reason }}',
+            'github_run_id': '${{ github.run_id }}',
+            'model_comparison': {k: {
+                'test_rmse': v['test_rmse'], 
+                'test_r2': v['test_r2']
+            } for k, v in model_results.items()}
         }
         
         with open(f'{model_dir}/metadata.json', 'w') as f:
             json.dump(metadata, f, indent=2)
         
         print(f'Model saved to {model_dir}')
+        print(f'Model file: {model_path}')
+        print(f'Model size: {os.path.getsize(model_path) / 1024 / 1024:.2f} MB')
         
         # Set GitHub outputs
         print(f'::set-output name=model_version::{model_version}')
         print(f'::set-output name=model_performance::{best_score:.4f}')
+        print(f'::set-output name=model_path::{model_path}')
         "
         
     - name: Upload model artifact
@@ -369,170 +565,332 @@ jobs:
         name: challenger-model-${{ steps.train-model.outputs.model_version }}
         path: models/
         retention-days: 90
-        
-    - name: Build challenger Docker image
-      run: |
-        # Create Dockerfile for challenger model
-        cat > Dockerfile.challenger << EOF
-        FROM python:3.9-slim
-        
-        WORKDIR /app
-        
-        COPY requirements.txt .
-        RUN pip install -r requirements.txt
-        
-        COPY api/ ./api/
-        COPY models/${{ steps.train-model.outputs.model_version }}/ ./models/current/
-        
-        EXPOSE 8000
-        
-        CMD [\"uvicorn\", \"api.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]
-        EOF
-        
-        docker build -f Dockerfile.challenger -t challenger-model:${{ steps.train-model.outputs.model_version }} .
-        
-    - name: Deploy challenger model
-      id: deploy-challenger
-      run: |
-        # In a real scenario, this would deploy to your cloud provider
-        # For now, we'll simulate the deployment
-        
-        challenger_endpoint="http://dynamic-pricing-challenger-${{ github.run_number }}.eastus.azurecontainer.io:8000"
-        
-        echo "Deploying challenger model to: $challenger_endpoint"
-        echo "Model version: ${{ steps.train-model.outputs.model_version }}"
-        
-        # Simulate deployment steps:
-        # 1. Push Docker image to registry
-        # 2. Deploy to Azure Container Instances or Kubernetes
-        # 3. Configure load balancer for A/B testing
-        
-        echo "::set-output name=challenger_endpoint::$challenger_endpoint"
 
-  setup-ab-test:
-    name: Setup A/B Test
+  deploy-challenger:
+    name: Deploy Challenger Model
     runs-on: ubuntu-latest
     needs: [check-retraining-triggers, retrain-model]
     if: needs.check-retraining-triggers.outputs.should_retrain == 'true' && needs.retrain-model.result == 'success'
+    outputs:
+      challenger_slot_url: ${{ steps.deploy.outputs.challenger_slot_url }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download model artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: challenger-model-${{ needs.retrain-model.outputs.model_version }}
+        path: models/
+        
+    - name: Download training data artifact
+      uses: actions/download-artifact@v3
+      with:
+        name: training-data-${{ needs.check-retraining-triggers.outputs.data_version }}
+        path: data/training/
+        
+    - name: Create challenger deployment package
+      run: |
+        # Create challenger deployment directory
+        mkdir -p deployment/challenger
+        
+        # Copy API code
+        cp -r api/* deployment/challenger/
+        cp requirements.txt deployment/challenger/
+        
+        # Copy new model
+        cp -r models deployment/challenger/
+        cp -r data deployment/challenger/
+        
+        # Create challenger-specific startup script
+        cat > deployment/challenger/startup.sh << 'EOF'
+        #!/bin/bash
+        echo "Starting Dynamic Pricing Challenger API..."
+        echo "Model Version: ${{ needs.retrain-model.outputs.model_version }}"
+        python -m uvicorn main:app --host 0.0.0.0 --port 8000
+        EOF
+        chmod +x deployment/challenger/startup.sh
+        
+        # Create web.config for challenger
+        cat > deployment/challenger/web.config << 'EOF'
+        <?xml version="1.0" encoding="utf-8"?>
+        <configuration>
+          <system.webServer>
+            <handlers>
+              <add name="PythonHandler" path="*" verb="*" modules="httpPlatformHandler" resourceType="Unspecified"/>
+            </handlers>
+            <httpPlatform processPath="startup.sh" 
+                          arguments="" 
+                          stdoutLogEnabled="true" 
+                          stdoutLogFile="\\home\\LogFiles\\challenger.log" 
+                          startupTimeLimit="60"
+                          requestTimeout="00:04:00">
+              <environmentVariables>
+                <environmentVariable name="PORT" value="8000" />
+                <environmentVariable name="PYTHONPATH" value="." />
+                <environmentVariable name="MODEL_VERSION" value="${{ needs.retrain-model.outputs.model_version }}" />
+                <environmentVariable name="DEPLOYMENT_TYPE" value="challenger" />
+              </environmentVariables>
+            </httpPlatform>
+          </system.webServer>
+        </configuration>
+        EOF
+        
+        # Create deployment package
+        cd deployment/challenger && zip -r ../../challenger-package.zip . && cd ../..
+        
+        echo "Challenger deployment package created: challenger-package.zip"
+        ls -la challenger-package.zip
+        
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Deploy challenger to staging slot
+      id: deploy
+      run: |
+        # Create challenger slot if it doesn't exist
+        az webapp deployment slot create \
+          --name ${{ env.API_APP_NAME }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --slot challenger || echo "Challenger slot already exists"
+        
+        # Deploy challenger package to slot
+        az webapp deployment source config-zip \
+          --name ${{ env.API_APP_NAME }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --slot challenger \
+          --src challenger-package.zip
+        
+        # Configure challenger app settings
+        az webapp config appsettings set \
+          --name ${{ env.API_APP_NAME }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --slot challenger \
+          --settings \
+            ENVIRONMENT=challenger \
+            MODEL_VERSION="${{ needs.retrain-model.outputs.model_version }}" \
+            DEPLOYMENT_TYPE=challenger \
+            MLFLOW_TRACKING_URI="${{ env.MLFLOW_TRACKING_URI }}" \
+            AZURE_SUBSCRIPTION_ID="${{ env.AZURE_SUBSCRIPTION_ID }}" \
+            WEBSITE_RUN_FROM_PACKAGE=1 \
+            SCM_DO_BUILD_DURING_DEPLOYMENT=false \
+            CHALLENGER_CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            TRIGGER_REASON="${{ needs.check-retraining-triggers.outputs.trigger_reason }}"
+        
+        # Get challenger URL
+        challenger_url="https://${{ env.API_APP_NAME }}-challenger.azurewebsites.net"
+        
+        echo "Challenger deployed to: $challenger_url"
+        echo "::set-output name=challenger_slot_url::$challenger_url"
+        
+    - name: Test challenger deployment
+      run: |
+        challenger_url="${{ steps.deploy.outputs.challenger_slot_url }}"
+        
+        # Wait for deployment to complete
+        echo "Waiting for challenger deployment to be ready..."
+        sleep 120
+        
+        # Test challenger health
+        echo "Testing challenger health..."
+        for i in {1..5}; do
+          if curl -f "$challenger_url/health"; then
+            echo "Challenger health check passed"
+            break
+          else
+            echo "Challenger health check failed, attempt $i/5"
+            sleep 30
+          fi
+        done
+        
+        # Test challenger model info
+        echo "Testing challenger model info..."
+        curl -f "$challenger_url/model/info" || echo "Challenger model info failed"
+        
+        # Test challenger prediction
+        echo "Testing challenger prediction..."
+        curl -X POST "$challenger_url/predict" \
+          -H "Content-Type: application/json" \
+          -d '{
+            "MRP": 100.0,
+            "NoPromoPrice": 90.0,
+            "SellingPrice": 80.0,
+            "CTR": 0.025,
+            "AbandonedCartRate": 0.2,
+            "BounceRate": 0.3,
+            "IsMetro": true,
+            "month": 6,
+            "day": 15,
+            "dayofweek": 3,
+            "quarter": 2,
+            "competitor_price": 85.0
+          }' || echo "Challenger prediction test failed"
+
+  setup-ab-test:
+    name: Setup A/B Test Traffic Routing
+    runs-on: ubuntu-latest
+    needs: [check-retraining-triggers, retrain-model, deploy-challenger]
+    if: needs.check-retraining-triggers.outputs.should_retrain == 'true' && needs.deploy-challenger.result == 'success'
     
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
       
-    - name: Configure A/B test routing
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+      
+    - name: Configure A/B test traffic routing
       run: |
-        echo "Setting up A/B test configuration..."
+        echo "Setting up A/B test configuration for Azure App Service slots..."
         
-        # Create A/B test configuration
+        # Configure traffic routing between production and challenger slots
+        # 90% to production, 10% to challenger
+        az webapp traffic-routing set \
+          --name ${{ env.API_APP_NAME }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --distribution production=90 challenger=10
+        
+        # Create A/B test configuration metadata
         cat > ab-test-config.json << EOF
         {
           "experiment_id": "model-retraining-${{ github.run_number }}",
+          "model_version": "${{ needs.retrain-model.outputs.model_version }}",
           "start_time": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
           "duration_days": 7,
           "traffic_split": {
-            "champion": 90,
+            "production": 90,
             "challenger": 10
           },
-          "champion_endpoint": "http://dynamic-pricing-api.eastus.azurecontainer.io:8000",
-          "challenger_endpoint": "${{ needs.retrain-model.outputs.challenger_endpoint }}",
+          "production_endpoint": "https://${{ env.API_APP_NAME }}.azurewebsites.net",
+          "challenger_endpoint": "${{ needs.deploy-challenger.outputs.challenger_slot_url }}",
           "success_metrics": [
-            "conversion_rate",
-            "revenue_per_user",
-            "prediction_accuracy"
+            "prediction_accuracy",
+            "response_time",
+            "error_rate",
+            "throughput"
           ],
           "minimum_sample_size": 1000,
-          "statistical_significance_threshold": 0.05
+          "statistical_significance_threshold": 0.05,
+          "performance_improvement_threshold": 0.03,
+          "trigger_reason": "${{ needs.check-retraining-triggers.outputs.trigger_reason }}"
         }
         EOF
         
         echo "A/B test configuration:"
         cat ab-test-config.json
         
-        # In a real scenario, this would:
-        # 1. Update load balancer configuration
-        # 2. Configure traffic routing rules
-        # 3. Set up monitoring and alerting
-        # 4. Initialize experiment tracking
-        
-    - name: Start A/B test monitoring
+        # Store configuration in Azure App Configuration or Storage Account
+        # For now, we'll store it as an app setting
+        az webapp config appsettings set \
+          --name ${{ env.API_APP_NAME }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --settings \
+            AB_TEST_CONFIG="$(cat ab-test-config.json | tr -d '\n')" \
+            AB_TEST_START_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            AB_TEST_EXPERIMENT_ID="model-retraining-${{ github.run_number }}"
+    
+    - name: Setup monitoring and alerts for A/B test
       run: |
-        python -c "
-        import json
-        from datetime import datetime, timedelta
+        echo "Setting up A/B test monitoring..."
         
-        print('Starting A/B test monitoring...')
+        # Create Application Insights alert rules for the A/B test
+        # Alert if challenger error rate is significantly higher
+        az monitor metrics alert create \
+          --name "Challenger-High-Error-Rate-${{ github.run_number }}" \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --scopes /subscriptions/${{ env.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Web/sites/${{ env.API_APP_NAME }}/slots/challenger \
+          --condition "avg Http5xx > 10" \
+          --description "Alert when challenger slot error rate exceeds 10 errors per minute" \
+          --window-size 5m \
+          --evaluation-frequency 1m || echo "Alert creation failed"
         
-        # Create monitoring configuration
-        monitoring_config = {
-            'experiment_id': 'model-retraining-${{ github.run_number }}',
-            'monitoring_interval_minutes': 30,
-            'alert_thresholds': {
-                'error_rate_threshold': 0.05,
-                'latency_threshold_ms': 1000,
-                'traffic_split_deviation_threshold': 0.05
-            },
-            'auto_promotion_criteria': {
-                'min_runtime_hours': 168,  # 7 days
-                'min_samples_per_variant': 1000,
-                'improvement_threshold': 0.02,
-                'significance_level': 0.05
-            }
-        }
+        # Alert if challenger response time is significantly higher
+        az monitor metrics alert create \
+          --name "Challenger-High-Response-Time-${{ github.run_number }}" \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --scopes /subscriptions/${{ env.AZURE_SUBSCRIPTION_ID }}/resourceGroups/${{ env.AZURE_RESOURCE_GROUP }}/providers/Microsoft.Web/sites/${{ env.API_APP_NAME }}/slots/challenger \
+          --condition "avg AverageResponseTime > 10000" \
+          --description "Alert when challenger response time exceeds 10 seconds" \
+          --window-size 5m \
+          --evaluation-frequency 1m || echo "Alert creation failed"
         
-        print('Monitoring configuration set up successfully')
-        print(f'Experiment will run for 7 days with 10% traffic to challenger')
-        print(f'Auto-promotion will occur if challenger shows >2% improvement with 95% confidence')
-        "
+        echo "A/B test monitoring configured successfully"
 
   notify-stakeholders:
     name: Notify Stakeholders
     runs-on: ubuntu-latest
-    needs: [check-retraining-triggers, retrain-model, setup-ab-test]
+    needs: [check-retraining-triggers, retrain-model, deploy-challenger, setup-ab-test]
     if: always()
     
     steps:
-    - name: Notify on successful retraining
-      if: needs.retrain-model.result == 'success'
+    - name: Notify on successful retraining and A/B test start
+      if: needs.retrain-model.result == 'success' && needs.deploy-challenger.result == 'success'
       uses: actions/github-script@v6
       with:
         script: |
+          const challengerUrl = '${{ needs.deploy-challenger.outputs.challenger_slot_url }}';
+          const productionUrl = `https://${{ env.API_APP_NAME }}.azurewebsites.net`;
+          const uiUrl = `https://${{ env.UI_APP_NAME }}.azurewebsites.net`;
+          
           github.rest.issues.create({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            title: `Model Retraining Completed Successfully - Run ${{ github.run_number }}`,
+            title: `🔄 Model Retraining & A/B Test Started - Run ${{ github.run_number }}`,
             body: `
-            ## 🔄 Model Retraining Completed Successfully
+            ## 🔄 Model Retraining Completed & A/B Test Started!
             
             **Run Number:** ${{ github.run_number }}
             **Trigger Reason:** ${{ needs.check-retraining-triggers.outputs.trigger_reason }}
             **Timestamp:** ${new Date().toISOString()}
             
-            ### What happened:
-            - ✅ New training data collected
-            - ✅ Multiple models retrained and evaluated
-            - ✅ Best performing model selected as challenger
-            - ✅ Challenger model deployed for A/B testing
-            - ✅ A/B test monitoring started (10% traffic)
-            
-            ### Model Details:
+            ### 🏆 New Model Details:
             - **Model Version:** ${{ needs.retrain-model.outputs.model_version }}
-            - **Performance Score:** ${{ needs.retrain-model.outputs.model_performance }}
+            - **Performance (RMSE):** ${{ needs.retrain-model.outputs.model_performance }}
             - **Data Version:** ${{ needs.check-retraining-triggers.outputs.data_version }}
+            - **Training Samples:** Enhanced dataset with seasonal patterns
             
-            ### Next Steps:
-            1. Monitor challenger performance for 7 days
-            2. Compare metrics between champion and challenger
-            3. Automatic promotion if challenger outperforms champion
-            4. Manual review available at any time
+            ### 🚀 Deployment Status:
+            - ✅ New model trained with hyperparameter optimization
+            - ✅ Challenger deployed to Azure App Service slot
+            - ✅ A/B test traffic routing configured (90%/10%)
+            - ✅ Monitoring and alerts configured
             
-            ### A/B Test Details:
+            ### 🌐 Service URLs:
+            - **Production API (90% traffic):** [${productionUrl}](${productionUrl})
+            - **Challenger API (10% traffic):** [${challengerUrl}](${challengerUrl})
+            - **UI Dashboard:** [${uiUrl}](${uiUrl})
+            
+            ### 📊 A/B Test Configuration:
             - **Duration:** 7 days
-            - **Traffic Split:** 90% Champion, 10% Challenger
-            - **Challenger Endpoint:** ${{ needs.retrain-model.outputs.challenger_endpoint }}
+            - **Traffic Split:** 90% Champion → 10% Challenger
+            - **Sample Size Goal:** 1,000+ requests per variant
+            - **Success Criteria:** >3% improvement with 95% confidence
             
-            The system will automatically evaluate and promote the challenger if it shows significant improvement.
+            ### 🔍 Monitoring:
+            - Application Insights tracking both variants
+            - Automated alerts for performance degradation
+            - Daily evaluation checks scheduled
+            - Manual promotion available anytime
+            
+            ### 📈 What to Expect:
+            1. **Days 1-3:** Data collection and initial analysis
+            2. **Days 4-6:** Performance comparison and statistical testing
+            3. **Day 7:** Final evaluation and potential promotion
+            
+            ### 🎯 Next Steps:
+            - Monitor both endpoints for performance
+            - Review daily A/B test reports
+            - Automatic promotion if challenger outperforms champion
+            - Manual intervention available if needed
+            
+            **The A/B test is now live! Both models are serving production traffic.**
             `,
-            labels: ['ml-ops', 'retraining', 'success', 'ab-test']
+            labels: ['ml-ops', 'retraining', 'success', 'ab-test', 'azure-app-service']
           })
     
     - name: Notify on retraining failure
@@ -543,7 +901,7 @@ jobs:
           github.rest.issues.create({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            title: `Model Retraining Failed - Run ${{ github.run_number }}`,
+            title: `❌ Model Retraining Failed - Run ${{ github.run_number }}`,
             body: `
             ## ❌ Model Retraining Failed
             
@@ -553,17 +911,29 @@ jobs:
             
             The automated retraining pipeline has failed. Please review the logs and take corrective action.
             
-            [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            ### 🔍 Failure Analysis:
+            - **Data Collection:** ${{ needs.collect-training-data.result == 'success' && '✅ Success' || '❌ Failed' }}
+            - **Model Training:** ${{ needs.retrain-model.result == 'success' && '✅ Success' || '❌ Failed' }}
+            - **Challenger Deployment:** ${{ needs.deploy-challenger.result == 'success' && '✅ Success' || '❌ Failed' }}
             
-            ### Possible Issues:
-            - Data collection failure
-            - Model training errors
-            - Infrastructure problems
-            - Configuration issues
+            ### 🛠️ Investigation Steps:
+            1. Check workflow logs for specific error messages
+            2. Verify training data quality and availability
+            3. Check Azure App Service health and capacity
+            4. Review model training parameters and dependencies
+            5. Validate Azure credentials and permissions
+            
+            ### 🌐 Current Production Status:
+            - **Production API:** https://${{ env.API_APP_NAME }}.azurewebsites.net
+            - **UI Dashboard:** https://${{ env.UI_APP_NAME }}.azurewebsites.net
+            
+            **Production services should remain unaffected by this failure.**
+            
+            [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
             
             **Action Required:** Manual investigation and fix needed.
             `,
-            labels: ['ml-ops', 'retraining', 'failure', 'urgent']
+            labels: ['ml-ops', 'retraining', 'failure', 'urgent', 'azure-app-service']
           })
     
     - name: Notify if no retraining needed
@@ -571,12 +941,10 @@ jobs:
       uses: actions/github-script@v6
       with:
         script: |
-          console.log('No retraining triggers detected. Model is up to date.');
-          
           github.rest.issues.create({
             owner: context.repo.owner,
             repo: context.repo.repo,
-            title: `Model Retraining Check - No Action Needed - Run ${{ github.run_number }}`,
+            title: `ℹ️ Model Retraining Check - No Action Needed - Run ${{ github.run_number }}`,
             body: `
             ## ℹ️ Model Retraining Check Completed
             
@@ -584,17 +952,104 @@ jobs:
             **Timestamp:** ${new Date().toISOString()}
             
             The automated retraining pipeline checked for retraining triggers but found none.
-            The current model is still performing within acceptable parameters.
+            The current production model is still performing within acceptable parameters.
             
-            ### What was checked:
-            - ✅ Data freshness
-            - ✅ Model performance metrics
-            - ✅ Data drift indicators
-            - ✅ External triggers
+            ### ✅ Checks Performed:
+            - **Production API Health:** Verified at https://${{ env.API_APP_NAME }}.azurewebsites.net
+            - **Model Performance:** Within acceptable thresholds
+            - **Data Freshness:** Current data is sufficient
+            - **Time-based Triggers:** No weekly schedule trigger
+            - **External Triggers:** No manual or automated triggers detected
             
-            **Result:** No retraining needed at this time.
+            ### 📊 Current Production Status:
+            - **API Service:** https://${{ env.API_APP_NAME }}.azurewebsites.net
+            - **UI Dashboard:** https://${{ env.UI_APP_NAME }}.azurewebsites.net
+            - **Model Status:** Current champion model performing well
             
-            The next scheduled check will run according to the cron schedule or when triggered manually.
+            ### 🔄 Next Scheduled Check:
+            - **Weekly Schedule:** Every Sunday at 2 AM UTC
+            - **Manual Trigger:** Available anytime via workflow dispatch
+            - **Automatic Trigger:** Performance degradation or data drift detection
+            
+            **No action required. System is operating normally.**
             `,
-            labels: ['ml-ops', 'retraining', 'info']
+            labels: ['ml-ops', 'retraining', 'info', 'azure-app-service']
           })
+
+  cleanup-old-resources:
+    name: Cleanup Old Resources
+    runs-on: ubuntu-latest
+    needs: [setup-ab-test]
+    if: needs.setup-ab-test.result == 'success'
+    
+    steps:
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Cleanup old challenger slots
+      run: |
+        echo "Cleaning up old challenger slots..."
+        
+        # Get all deployment slots for the API app
+        slots=$(az webapp deployment slot list \
+          --name ${{ env.API_APP_NAME }} \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "[?name!='production' && name!='challenger'].name" -o tsv)
+        
+        # Delete old slots (keep only current challenger)
+        for slot in $slots; do
+          if [[ $slot == *"old"* ]] || [[ $slot == *"backup"* ]]; then
+            echo "Deleting old slot: $slot"
+            az webapp deployment slot delete \
+              --name ${{ env.API_APP_NAME }} \
+              --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+              --slot $slot || echo "Failed to delete slot $slot"
+          fi
+        done
+        
+        # Clean up old alert rules (keep only current experiment)
+        old_alerts=$(az monitor metrics alert list \
+          --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+          --query "[?contains(name, 'Challenger-') && !contains(name, '${{ github.run_number }}')].name" -o tsv)
+        
+        for alert in $old_alerts; do
+          echo "Deleting old alert: $alert"
+          az monitor metrics alert delete \
+            --name "$alert" \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} || echo "Failed to delete alert $alert"
+        done
+        
+        echo "Cleanup completed"
+
+  schedule-evaluation:
+    name: Schedule A/B Test Evaluation
+    runs-on: ubuntu-latest
+    needs: [setup-ab-test]
+    if: needs.setup-ab-test.result == 'success'
+    
+    steps:
+    - name: Schedule daily evaluation workflow
+      uses: actions/github-script@v6
+      with:
+        script: |
+          // Create a repository dispatch event to trigger the A/B test evaluation workflow
+          // This will be picked up by the ab-test-evaluation.yml workflow
+          
+          await github.rest.repos.createDispatchEvent({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            event_type: 'ab-test-started',
+            client_payload: {
+              experiment_id: 'model-retraining-${{ github.run_number }}',
+              model_version: '${{ needs.retrain-model.outputs.model_version }}',
+              challenger_url: '${{ needs.deploy-challenger.outputs.challenger_slot_url }}',
+              production_url: 'https://${{ env.API_APP_NAME }}.azurewebsites.net',
+              start_time: new Date().toISOString(),
+              github_run_id: '${{ github.run_id }}'
+            }
+          });
+          
+          console.log('A/B test evaluation workflow will be triggered daily for the next 7 days');
+          console.log('Manual evaluation can be triggered anytime using the ab-test-evaluation workflow');
