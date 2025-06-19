@@ -1,0 +1,171 @@
+name: MLOps CI/CD Pipeline
+
+on:
+  push:
+    branches: [feature/dummy]
+  pull_request:
+
+env:
+  AZURE_STORAGE_ACCOUNT: ${{ secrets.AZURE_STORAGE_ACCOUNT }}
+  AZURE_STORAGE_KEY: ${{ secrets.AZURE_STORAGE_KEY }}
+  AZUREML_SUBSCRIPTION_ID: ${{ secrets.AZUREML_SUBSCRIPTION_ID }}
+  AZUREML_RESOURCE_GROUP: ${{ secrets.AZUREML_RESOURCE_GROUP }}
+  AZUREML_WORKSPACE: ${{ secrets.AZUREML_WORKSPACE }}
+  AZUREML_TENANT_ID: ${{ secrets.AZUREML_TENANT_ID }}
+  AZUREML_CLIENT_ID: ${{ secrets.AZUREML_CLIENT_ID }}
+  AZUREML_CLIENT_SECRET: ${{ secrets.AZUREML_CLIENT_SECRET }}
+
+jobs:
+  code-quality:
+    name: Code Quality & Security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install linters and security tools
+        run: |
+          pip install flake8 bandit
+      - name: Lint with flake8
+        run: flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Security scan with Bandit
+        run: bandit -r . -ll
+
+  test:
+    name: Unit, Integration & Smoke Tests
+    runs-on: ubuntu-latest
+    needs: code-quality
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: |
+          pip install -r api/requirements.txt
+          pip install pytest pytest-cov
+      - name: Run all tests with coverage
+        run: |
+          pytest --cov=api --cov=notebooks --cov-report=xml
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  train-model:
+    name: Model Training & Validation (Databricks)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Databricks CLI
+        run: pip install databricks-cli
+      - name: Configure Databricks CLI
+        run: |
+          databricks configure --token <<EOF
+          ${{ secrets.DATABRICKS_HOST }}
+          ${{ secrets.DATABRICKS_TOKEN }}
+          EOF
+      - name: Upload notebooks to Databricks
+        run: |
+          databricks workspace import_dir notebooks /Workspace/hackathon-dynamic-pricing -o
+      - name: Trigger Databricks job for training
+        run: |
+          databricks jobs run-now --job-id ${{ secrets.DATABRICKS_JOB_ID }}
+      - name: Download trained model artifact from ADLS
+        run: |
+          az storage fs file download --account-name $AZURE_STORAGE_ACCOUNT --file-system dynamicpricing --path models/dynamic_pricing_model.pkl --dest model.pkl --account-key $AZURE_STORAGE_KEY --overwrite true
+          az storage fs file download --account-name $AZURE_STORAGE_ACCOUNT --file-system dynamicpricing --path models/feature_names.txt --dest feature_names.txt --account-key $AZURE_STORAGE_KEY --overwrite true
+      - name: Upload model artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trained-model
+          path: |
+            model.pkl
+            feature_names.txt
+
+  register-model:
+    name: Register Model in MLflow & Azure ML
+    runs-on: ubuntu-latest
+    needs: train-model
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: trained-model
+      - name: Set up Azure CLI
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZUREML_CLIENT_ID }}
+          tenant-id: ${{ env.AZUREML_TENANT_ID }}
+          subscription-id: ${{ env.AZUREML_SUBSCRIPTION_ID }}
+          client-secret: ${{ env.AZUREML_CLIENT_SECRET }}
+      - name: Register model in Azure ML
+        run: |
+          az ml model register --name dynamic_pricing_model --path model.pkl --workspace-name $AZUREML_WORKSPACE --resource-group $AZUREML_RESOURCE_GROUP
+      - name: Register model in MLflow
+        run: |
+          pip install mlflow
+          mlflow models register -m ./model.pkl -n dynamic_pricing_model
+
+  blue-green-deploy:
+    name: Blue-Green Deployment & Monitoring
+    runs-on: ubuntu-latest
+    needs: register-model
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy new model version (Blue-Green)
+        run: |
+          az ml online-endpoint update --name dynamic-pricing-endpoint --deployment-target blue --model dynamic_pricing_model:latest
+      - name: Run smoke test on blue deployment
+        run: |
+          curl -X POST "https://<your-endpoint>/score" -H "Content-Type: application/json" -d '{"MRP":100,"NoPromoPrice":90,"SellingPrice":80,"CTR":0.02,"AbandonedCartRate":0.2,"BounceRate":0.3,"IsMetro":true,"month":6,"day":15,"dayofweek":3,"quarter":2,"competitor_price":85}'
+      - name: Promote blue to green if healthy
+        run: |
+          az ml online-endpoint update --name dynamic-pricing-endpoint --deployment-target green --model dynamic_pricing_model:latest
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: blue-green-deploy
+    if: failure()
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rollback to previous model version
+        run: |
+          az ml online-endpoint update --name dynamic-pricing-endpoint --deployment-target green --model dynamic_pricing_model:previous
+
+  notify:
+    name: Notifications & Reporting
+    runs-on: ubuntu-latest
+    needs: [blue-green-deploy, rollback]
+    steps:
+      - name: Notify on Success
+        if: success()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.example.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "✅ MLOps Pipeline Success"
+          body: "The MLOps pipeline completed successfully and the model is deployed."
+          to: team@example.com
+          from: mlops-pipeline@example.com
+      - name: Notify on Failure
+        if: failure()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.example.com
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "❌ MLOps Pipeline Failure"
+          body: "The MLOps pipeline failed. Please check the logs and take action."
+          to: team@example.com
+          from: mlops-pipeline@example.com
