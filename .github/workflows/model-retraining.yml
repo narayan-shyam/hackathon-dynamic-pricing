@@ -1,0 +1,67 @@
+          body: `
+            ## 🔄 Model Retraining Completed Successfully
+            
+            **Run Number:** ${{ github.run_number }}
+            **Trigger Reason:** ${{ needs.check-retraining-triggers.outputs.trigger_reason }}
+            **Timestamp:** ${new Date().toISOString()}
+            
+            ### What happened:
+            - ✅ New training data collected
+            - ✅ Multiple models retrained and evaluated
+            - ✅ Best performing model selected as challenger
+            - ✅ Challenger model deployed for A/B testing
+            - ✅ A/B test monitoring started (10% traffic)
+            
+            ### Next Steps:
+            1. Monitor challenger performance for 7 days
+            2. Compare metrics between champion and challenger
+            3. Automatic promotion if challenger outperforms champion
+            4. Manual review available at any time
+            
+            ### A/B Test Details:
+            - **Duration:** 7 days
+            - **Traffic Split:** 90% Champion, 10% Challenger
+            - **Challenger Endpoint:** http://dynamic-pricing-challenger-${{ github.run_number }}.eastus.azurecontainer.io:8000
+            
+            The system will automatically evaluate and promote the challenger if it shows significant improvement.
+            `,
+            labels: ['ml-ops', 'retraining', 'success', 'ab-test']
+          })
+    
+    - name: Notify on retraining failure
+      if: needs.retrain-model.result == 'failure'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `Model Retraining Failed - ${{ github.run_number }}`,
+            body: `
+            ## ❌ Model Retraining Failed
+            
+            **Run Number:** ${{ github.run_number }}
+            **Trigger Reason:** ${{ needs.check-retraining-triggers.outputs.trigger_reason }}
+            **Timestamp:** ${new Date().toISOString()}
+            
+            The automated retraining pipeline has failed. Please review the logs and take corrective action.
+            
+            [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            
+            ### Possible Issues:
+            - Data collection failure
+            - Model training errors
+            - Infrastructure problems
+            - Configuration issues
+            
+            **Action Required:** Manual investigation and fix needed.
+            `,
+            labels: ['ml-ops', 'retraining', 'failure', 'urgent']
+          })
+    
+    - name: Notify if no retraining needed
+      if: needs.check-retraining-triggers.outputs.should_retrain == 'false'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          console.log('No retraining triggers detected. Model is up to date.');
