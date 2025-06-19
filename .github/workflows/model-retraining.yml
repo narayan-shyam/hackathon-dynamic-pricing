@@ -1,67 +1,91 @@
-          body: `
-            ## 🔄 Model Retraining Completed Successfully
-            
-            **Run Number:** ${{ github.run_number }}
-            **Trigger Reason:** ${{ needs.check-retraining-triggers.outputs.trigger_reason }}
-            **Timestamp:** ${new Date().toISOString()}
-            
-            ### What happened:
-            - ✅ New training data collected
-            - ✅ Multiple models retrained and evaluated
-            - ✅ Best performing model selected as challenger
-            - ✅ Challenger model deployed for A/B testing
-            - ✅ A/B test monitoring started (10% traffic)
-            
-            ### Next Steps:
-            1. Monitor challenger performance for 7 days
-            2. Compare metrics between champion and challenger
-            3. Automatic promotion if challenger outperforms champion
-            4. Manual review available at any time
-            
-            ### A/B Test Details:
-            - **Duration:** 7 days
-            - **Traffic Split:** 90% Champion, 10% Challenger
-            - **Challenger Endpoint:** http://dynamic-pricing-challenger-${{ github.run_number }}.eastus.azurecontainer.io:8000
-            
-            The system will automatically evaluate and promote the challenger if it shows significant improvement.
-            `,
-            labels: ['ml-ops', 'retraining', 'success', 'ab-test']
-          })
-    
-    - name: Notify on retraining failure
-      if: needs.retrain-model.result == 'failure'
-      uses: actions/github-script@v6
+name: Model Retraining Pipeline - Azure App Services
+
+on:
+  schedule:
+    # Run weekly on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      force_retrain:
+        description: 'Force retraining regardless of triggers'
+        required: false
+        default: 'false'
+        type: boolean
+      data_source:
+        description: 'Data source for retraining'
+        required: false
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+          - manual_upload
+  repository_dispatch:
+    types: [model-performance-degraded, data-drift-detected]
+
+env:
+  PYTHON_VERSION: '3.9'
+  AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+  AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+  AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+  AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+  
+  # Azure App Service Names
+  API_APP_NAME: 'oopsallaiapi'
+  UI_APP_NAME: 'oopsallaiui'
+
+jobs:
+  check-retraining-triggers:
+    name: Check Retraining Triggers
+    runs-on: ubuntu-latest
+    outputs:
+      should_retrain: ${{ steps.check-triggers.outputs.should_retrain }}
+      trigger_reason: ${{ steps.check-triggers.outputs.trigger_reason }}
+      data_version: ${{ steps.check-triggers.outputs.data_version }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        script: |
-          github.rest.issues.create({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            title: `Model Retraining Failed - ${{ github.run_number }}`,
-            body: `
-            ## ❌ Model Retraining Failed
-            
-            **Run Number:** ${{ github.run_number }}
-            **Trigger Reason:** ${{ needs.check-retraining-triggers.outputs.trigger_reason }}
-            **Timestamp:** ${new Date().toISOString()}
-            
-            The automated retraining pipeline has failed. Please review the logs and take corrective action.
-            
-            [View Workflow Run](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            
-            ### Possible Issues:
-            - Data collection failure
-            - Model training errors
-            - Infrastructure problems
-            - Configuration issues
-            
-            **Action Required:** Manual investigation and fix needed.
-            `,
-            labels: ['ml-ops', 'retraining', 'failure', 'urgent']
-          })
-    
-    - name: Notify if no retraining needed
-      if: needs.check-retraining-triggers.outputs.should_retrain == 'false'
-      uses: actions/github-script@v6
+        python-version: ${{ env.PYTHON_VERSION }}
+        
+    - name: Install dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install mlflow azure-ai-ml azure-storage-blob pandas numpy scikit-learn requests
+        
+    - name: Azure Login
+      uses: azure/login@v1
       with:
-        script: |
-          console.log('No retraining triggers detected. Model is up to date.');
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+        
+    - name: Check retraining triggers
+      id: check-triggers
+      run: |
+        python -c "
+        import os
+        import sys
+        import json
+        import requests
+        from datetime import datetime, timedelta
+        import pandas as pd
+        
+        # Initialize trigger flags
+        should_retrain = False
+        trigger_reasons = []
+        
+        # Check if force retrain is requested
+        force_retrain = '${{ github.event.inputs.force_retrain }}' == 'true'
+        if force_retrain:
+            should_retrain = True
+            trigger_reasons.append('Manual force retrain requested')
+        
+        # Check for repository dispatch events (performance degradation, data drift)
+        if '${{ github.event_name }}' == 'repository_dispatch':
+            should_retrain = True
+            trigger_reasons.append(f'Repository dispatch: ${{ github.event.action }}')
