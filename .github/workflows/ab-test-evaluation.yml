@@ -1,9 +1,9 @@
 name: A/B Test Evaluation - Azure App Services
 
 on:
-  schedule:
-    # Run daily to check A/B test progress
-    - cron: '0 6 * * *'
+  # schedule:
+  #   # Run daily to check A/B test progress
+  #   - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       experiment_id:
