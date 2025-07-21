@@ -5,9 +5,9 @@ on:
     branches: [ main, develop ]
   pull_request:
     branches: [ main ]
-  schedule:
-    # Run daily at 2 AM UTC for scheduled retraining checks
-    - cron: '0 2 * * *'
+  # schedule:
+  #   # Run daily at 2 AM UTC for scheduled retraining checks
+  #   - cron: '0 2 * * *'
 
 env:
   PYTHON_VERSION: '3.9'
